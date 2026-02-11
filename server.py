@@ -181,7 +181,17 @@ def handle_command(conn, username, line):
             conn.sendall(f"🟢 Unsubscribed from {target}\n".encode())
         else:
             conn.sendall(f"🟡 Not subscribed to {target}\n".encode())
+            
+    elif line.startswith("/subscribe_only "):
+        parts = line.split(maxsplit=1)
+        if len(parts) < 2:
+            conn.sendall("Usage: /subscribe_only <message>\n".encode())
+            return
 
+        message = parts[1]
+        # Calls the existing notify_subscribers function
+        notify_subscribers(username, f"{message}\n") 
+        conn.sendall(f"🔒 Sent to subscribers only: {message}\n".encode())
     else:
         # Standard Message - CHANGED: exclude_sender is now True
         # The sender will NOT get their own message echoed back.
