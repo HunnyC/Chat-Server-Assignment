@@ -9,24 +9,18 @@ import time
 
 # --- CONFIGURATION ---
 HOST = "0.0.0.0"
-# Allow port to be set via env for Docker scaling (default 8000)
 PORT = int(os.environ.get("PORT", 8000))
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 DEFAULT_ROOM = "lobby"
 
-# --- REDIS SETUP (Part 6) ---
-# We use decode_responses=True so we get strings instead of bytes
+# --- REDIS SETUP ---
 r = redis.Redis(host=REDIS_HOST, port=6379, db=0, decode_responses=True)
 PUB_SUB_CHANNEL = "global_chat_events"
 
 # --- LOCAL STATE ---
-# We still need local mapping to know which *socket* object corresponds to a user
-# strictly for sending data out. The "Source of Truth" for where a user IS remains in Redis.
 local_sock2user = {}  # socket -> username
 local_user2sock = {}  # username -> socket
 local_room2socks = {} # room_name -> set(sockets)
-
-# Hardcoded credentials some users
 
 users_db = {
     u: bcrypt.hashpw("1".encode(), bcrypt.gensalt()) 
@@ -36,11 +30,9 @@ users_db = {
 lock = threading.Lock()
 
 def get_redis_room_members(room):
-    """Fetch all users in a room from Redis."""
     return r.smembers(f"room:{room}")
 
 def get_redis_subscribers(target_user):
-    """Fetch all subscribers of a user from Redis."""
     return r.smembers(f"subs:{target_user}")
 
 def handle_redis_messages():
@@ -61,13 +53,19 @@ def handle_redis_messages():
                 target_room = data['room']
                 msg_content = data['content']
                 sender = data.get('sender')
+                exclude_sender = data.get('exclude_sender', False)
                 
                 # Send to all LOCAL sockets currently in this room
                 with lock:
                     if target_room in local_room2socks:
                         for sock in local_room2socks[target_room]:
                             
-                            # (Client logic usually handles this, or we permit echo)
+                            # LOGIC: If exclude_sender is True, skip the sender's own socket
+                            if exclude_sender and sender:
+                                sock_user = local_sock2user.get(sock)
+                                if sock_user == sender:
+                                    continue 
+
                             try:
                                 sock.sendall(msg_content.encode())
                             except:
@@ -78,7 +76,6 @@ def handle_redis_messages():
                 target_user = data['target_user']
                 msg_content = data['content']
                 
-                # If the target user is connected to THIS server, send it
                 with lock:
                     if target_user in local_user2sock:
                         try:
@@ -86,27 +83,19 @@ def handle_redis_messages():
                         except:
                             pass
 
-def broadcast_global_room(room, message, sender=None):
+def broadcast_global_room(room, message, sender=None, exclude_sender=False):
     """Publish a message to Redis so ALL servers can deliver it."""
     payload = {
         'type': 'room_msg',
         'room': room,
         'sender': sender,
-        'content': message
+        'content': message,
+        'exclude_sender': exclude_sender 
     }
     r.publish(PUB_SUB_CHANNEL, json.dumps(payload))
 
 def notify_subscribers(publisher, message):
-    """
-    Part 5/6: Send message to subscribers.
-    1. Get list of subscribers from Redis.
-    2. For each subscriber, trigger a specific message.
-    Note: Ideally, we publish ONE event, and every server checks if it has relevant subscribers.
-    """
     subscribers = get_redis_subscribers(publisher)
-    
-    # We publish a general "subscription event" to Redis
-    # Servers will receive this, check if they hold the socket for the subscriber, and deliver.
     for sub in subscribers:
         payload = {
             'type': 'direct_msg',
@@ -116,7 +105,6 @@ def notify_subscribers(publisher, message):
         r.publish(PUB_SUB_CHANNEL, json.dumps(payload))
 
 def handle_command(conn, username, line):
-    # Retrieve current room from Redis
     current_room = r.hget("user:room", username)
     if not current_room: 
         current_room = DEFAULT_ROOM
@@ -139,11 +127,12 @@ def handle_command(conn, username, line):
 
         # 3. Notify (Global)
         conn.sendall(f"🟢 You joined {new_room}\n".encode())
-        broadcast_global_room(current_room, f"🔴 {username} left {current_room}\n")
-        broadcast_global_room(new_room, f"🟢 {username} joined {new_room}\n")
+        
+        # Exclude sender from seeing "User joined" since they got "You joined"
+        broadcast_global_room(current_room, f"🔴 {username} left {current_room}\n", sender=username, exclude_sender=True)
+        broadcast_global_room(new_room, f"🟢 {username} joined {new_room}\n", sender=username, exclude_sender=True)
 
     elif line == "/leave":
-        # Logic similar to join, but target is default room
         r.srem(f"room:{current_room}", username)
         r.sadd(f"room:{DEFAULT_ROOM}", username)
         r.hset("user:room", username, DEFAULT_ROOM)
@@ -156,11 +145,12 @@ def handle_command(conn, username, line):
             local_room2socks[DEFAULT_ROOM].add(conn)
 
         conn.sendall(f"🟢 You returned to {DEFAULT_ROOM}\n".encode())
-        broadcast_global_room(current_room, f"🔴 {username} left {current_room}\n")
-        broadcast_global_room(DEFAULT_ROOM, f"🟢 {username} joined {DEFAULT_ROOM}\n")
+        
+        # Exclude sender
+        broadcast_global_room(current_room, f"🔴 {username} left {current_room}\n", sender=username, exclude_sender=True)
+        broadcast_global_room(DEFAULT_ROOM, f"🟢 {username} joined {DEFAULT_ROOM}\n", sender=username, exclude_sender=True)
 
     elif line == "/rooms":
-        # Part 6: Query Redis for rooms (keys matching room:*)
         keys = r.keys("room:*")
         room_list = []
         for k in keys:
@@ -180,7 +170,6 @@ def handle_command(conn, username, line):
         elif target == username:
             conn.sendall("🔴 Cannot subscribe to self\n".encode())
         else:
-            # Redis Add to Set
             r.sadd(f"subs:{target}", username)
             conn.sendall(f"🟢 Subscribed to {target}\n".encode())
 
@@ -194,9 +183,11 @@ def handle_command(conn, username, line):
             conn.sendall(f"🟡 Not subscribed to {target}\n".encode())
 
     else:
-        # Standard Message
-        broadcast_global_room(current_room, f"{username}: {line}\n", sender=username)
-        # Notify Subscribers
+        # Standard Message - CHANGED: exclude_sender is now True
+        # The sender will NOT get their own message echoed back.
+        broadcast_global_room(current_room, f"{username}: {line}\n", sender=username, exclude_sender=True)
+        
+        # Notify Subscribers (This should still go out)
         notify_subscribers(username, f"{line}\n")
 
 def handle_login(conn):
@@ -212,13 +203,10 @@ def handle_login(conn):
             conn.sendall("Invalid credentials\n".encode())
             return False, ""
 
-        # Part 3: Handle Duplicate Login (Reject Policy) via Redis
-        # Check if user is logged in ANYWHERE in the cluster
         if r.hexists("sessions", user):
             conn.sendall("User already logged in (Duplicate)\n".encode())
             return False, ""
         
-        # Register Session in Redis
         r.hset("sessions", user, "active")
         conn.sendall(f"Login successful. Welcome {user}!\n".encode())
         return True, user
@@ -227,13 +215,11 @@ def handle_login(conn):
         return False, ""
 
 def handle_client(conn, addr):
-    # Wrap socket in SSL is handled in main, but we passed the wrapped socket here
     success, username = handle_login(conn)
     if not success:
         conn.close()
         return
 
-    # Initial Setup
     with lock:
         local_sock2user[conn] = username
         local_user2sock[username] = conn
@@ -241,10 +227,14 @@ def handle_client(conn, addr):
             local_room2socks[DEFAULT_ROOM] = set()
         local_room2socks[DEFAULT_ROOM].add(conn)
 
-    # Redis Initial State
     r.hset("user:room", username, DEFAULT_ROOM)
     r.sadd(f"room:{DEFAULT_ROOM}", username)
-    broadcast_global_room(DEFAULT_ROOM, f"🟢 {username} joined {DEFAULT_ROOM}\n")
+    
+    # Exclude sender for initial join
+    broadcast_global_room(DEFAULT_ROOM, f"🟢 {username} joined {DEFAULT_ROOM}\n", sender=username, exclude_sender=True)
+    
+    # Send direct welcome
+    conn.sendall(f"🟢 You joined {DEFAULT_ROOM}\n".encode())
 
     try:
         buffer = ""
@@ -258,17 +248,14 @@ def handle_client(conn, addr):
     except Exception as e:
         print(f"Error {addr}: {e}")
     finally:
-        # Cleanup
         current_room = r.hget("user:room", username)
         
-        # Redis Cleanup
         r.hdel("sessions", username)
         if current_room:
             r.srem(f"room:{current_room}", username)
             r.hdel("user:room", username)
-            broadcast_global_room(current_room, f"🔴 {username} left\n")
+            broadcast_global_room(current_room, f"🔴 {username} left\n", sender=username, exclude_sender=True)
 
-        # Local Cleanup
         with lock:
             if conn in local_sock2user: del local_sock2user[conn]
             if username in local_user2sock: del local_user2sock[username]
@@ -279,18 +266,13 @@ def handle_client(conn, addr):
         conn.close()
 
 def main():
-    # --- Part 7: SSL Context ---
-    # Create an SSL context
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    # Load the self-signed certificate and private key
-    # Ensure server.crt and server.key exist (use gen_cert.py)
     if os.path.exists("server.crt") and os.path.exists("server.key"):
         context.load_cert_chain(certfile="server.crt", keyfile="server.key")
     else:
         print("Warning: Keys not found. SSL will fail. Run gen_cert.py first.")
         return
 
-    # Start Redis Listener Thread
     t_redis = threading.Thread(target=handle_redis_messages, daemon=True)
     t_redis.start()
 
@@ -303,7 +285,6 @@ def main():
     while True:
         try:
             raw_conn, addr = server.accept()
-            # Wrap the socket with TLS
             conn = context.wrap_socket(raw_conn, server_side=True)
             print(f"Secure connection from {addr}")
             
