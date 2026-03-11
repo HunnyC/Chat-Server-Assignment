@@ -9,7 +9,7 @@ import time
 
 # --- CONFIGURATION ---
 HOST = "0.0.0.0"
-PORT = int(os.environ.get("PORT", 8000))
+SERVER_PORT = int(os.environ.get("SERVER_PORT", 8000))
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 DEFAULT_ROOM = "lobby"
 
@@ -288,9 +288,9 @@ def main():
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((HOST, PORT))
+    server.bind((HOST, SERVER_PORT))
     server.listen()
-    print(f"Secure Server listening on {HOST}:{PORT} (TLS Enabled)")
+    print(f"Secure Server listening on {HOST}:{SERVER_PORT} (TLS Enabled)")
 
     while True:
         try:
