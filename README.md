@@ -67,24 +67,34 @@ Ensure the following are installed before running the project.
 
 ---
 
-# Project Setup
+# Setup Instructions
 
-1. **Install dependencies:**
+Follow the steps below to prepare the environment and run the chat system.
+
+1. **Install Dependencies:**
+   
+   Install the required Python packages using the `requirements.txt` file:
    ```bash
    pip install -r requirements.txt
    ```
 
-2. **Generate TLS certificates (if not already present):**
+3. **Generate TLS certificates:**
+
+   If TLS certificates are not already available, generate them using the provided script:
    ```bash
    python generate_certs.py
    ```
+   This will create the necessary files used for secure server communication.
 
-3. **Start Redis:**
+5. **Start Redis:**
+
+   Redis is required for distributed state management and cross-server messaging.
+   Start Redis using one of the following methods:
    ```bash
-   # On Linux/Mac:
+   # Linux/Mac:
    redis-server
    
-   # On Windows with WSL:
+   # Windows with WSL:
    redis-server
    
    # Or use Docker:
@@ -93,8 +103,8 @@ Ensure the following are installed before running the project.
 
 ### Running Multiple Server Instances
 
-You can dynamically generate a `docker-compose.yml` file with **N** server instances and start them all with a single command.
-
+The project supports launching multiple chat servers simultaneously.
+A helper script is provided to automatically generate a docker-compose.yml file with the desired number of server instances.
 ```bash
 # Generate docker-compose.yml with N servers
 python generate_docker_compose.py 5
@@ -102,10 +112,11 @@ python generate_docker_compose.py 5
 # Start all services
 docker-compose up --build
 ```
+This command will start Redis along with multiple server instances.
 
 #### **Understanding the Output**
 
-When you run the above commands with N=5:
+If the script is executed with N = 5, the following services will be created:
 - ✓ Redis service on port `6379`
 - ✓ Server 1 on port `8000` (SERVER_ID=server1)
 - ✓ Server 2 on port `8001` (SERVER_ID=server2)
@@ -113,12 +124,14 @@ When you run the above commands with N=5:
 - ✓ Server 4 on port `8003` (SERVER_ID=server4)
 - ✓ Server 5 on port `8004` (SERVER_ID=server5)
 
-All servers share the same **Redis instance** and **network**, ensuring **cross-server message delivery** in rooms.
+All servers connect to the same Redis instance and operate on a shared network.
+This allows messages sent in chat rooms to propagate across different servers.
 
-#### **Test Cross-Server Communication**
+#### **Testing Cross-Server Communication**
 
+The following example demonstrates communication between clients connected to different server instances.
 ```bash
-# Terminal 1: Start 4 servers
+# Terminal 1: Start multiple servers
 python generate_docker_compose.py 4
 docker-compose up -d
 
@@ -140,32 +153,37 @@ SERVER_PORT=8002 python client.py
 
 ## Default Credentials
 
-The server comes with pre-registered users (a-h) with password "1":
+The server includes a set of pre-registered users for testing purposes.
 
 ```
-Username: a, Password: 1
-Username: b, Password: 1
-Username: c, Password: 1
-... (up to h)
+Username: a   Password: 1
+Username: b   Password: 1
+Username: c   Password: 1
+...
+Username: h   Password: 1
 ```
 
 ## Implementation Details
 
 ### Thread Model
-- Main thread accepts connections
-- Each client connection spawns a daemon thread
+The server uses a multi-threaded architecture:
+- The main thread listens for incoming client connections.
+- Each client connection is handled by a dedicated daemon thread.
 - Background threads for Redis Pub/Sub listening and heartbeat
 
 ### Duplicate Login Policy
-- When a user logs in, the server attempts to acquire an exclusive lock in Redis
-- If the lock exists (user already active), the new login is rejected
-- The lock is held for `ACTIVE_TTL_SECONDS` and refreshed via heartbeat
+To prevent multiple simultaneous logins for the same user:
+- The server attempts to acquire an exclusive lock in Redis during login.
+- If the lock already exists, the login attempt is rejected.
+- The lock remains active for `ACTIVE_TTL_SECONDS` and is periodically refreshed using a heartbeat mechanism.
 
 ### TLS Implementation
+The chat system enforces secure communication using TLS.
+Key properties include:
 - Mandatory TLS wrapping at socket level
-- Server provides self-signed certificate
-- Client verifies server certificate (with self-signed fallback)
-- All communication is encrypted end-to-end
+- Self-signed certificate provided by the server
+- Client verification of the server certificate (with fallback support)
+- All messages encrypted during transmission
 
 ## Files
 
